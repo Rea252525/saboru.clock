@@ -2,97 +2,172 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none';">
-
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="
+default-src 'self';
+base-uri 'self';
+object-src 'none';
+frame-ancestors 'self';
+img-src 'self' data: blob:;
+media-src 'self' blob:;
+connect-src 'self' blob: data:;
+worker-src 'self' blob:;
+style-src 'self' 'unsafe-inline';
+script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval' 'unsafe-inline';
+">
   <title>共有_サボる時計 v0.2.7</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2032%2032%27%3E%0A%3Crect%20x%3D%272%27%20y%3D%272%27%20width%3D%2728%27%20height%3D%2728%27%20rx%3D%276%27%20fill%3D%27black%27%20stroke%3D%27white%27%20stroke-width%3D%272%27%2F%3E%0A%3Cpath%20d%3D%27M6%2016%20h20%20M16%206%20v20%27%20stroke%3D%27white%27%20stroke-width%3D%272%27%20stroke-linecap%3D%27round%27%2F%3E%0A%3C%2Fsvg%3E">
+<style>
+    html, body { height:100%; margin:0; background:#000; color:#eee; }
+    #canvas-holder { position: fixed; inset: 0; background: #000; overflow: hidden; }
+    #ui {
+      position:fixed; left:10px; top:10px; z-index:99999;
+      background:rgba(20,20,20,0.86); color:#eaeaea; border:1px solid rgba(255,255,255,0.2);
+      border-radius:10px; padding:10px 14px; backdrop-filter:blur(4px);
+      box-shadow:0 6px 20px rgba(0,0,0,0.4);
+      font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      min-width: 280px;
+    }
+    #ui .row { margin:6px 0; }
+    #ui .note { font-size:12px; color:#a8e6a1; }
 
-  <style>
-    :root{ color-scheme: dark; }
-    html,body{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, 'Noto Sans JP', sans-serif; }
+    /* --- Camera preview (debug) --- */
+    #camWrap{position:fixed;left:0;top:0;right:auto;bottom:auto;width:280px;height:220px;z-index:99998;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.18);border-radius:10px;padding:0;display:none;overflow:hidden;}
+    #camInner{position:relative;width:100%;height:100%;background:rgba(0,0,0,0.18);overflow:hidden;}
+    #cam{width:100%;height:100%;display:block;object-fit:cover;transform:scaleX(-1);}
 
-    #canvas-holder{ position:fixed; inset:0; overflow:hidden; background:#000; }
+    #faceBox{
+      position:absolute;
+      left:0; top:0;
+      width:0; height:0;
+      border:2px solid rgba(0,255,0,0.9);
+      border-radius:6px;
+      box-sizing:border-box;
+      pointer-events:none;
+      display:none;
+    }
 
-    /* ---- Start overlay (camera must be started by user gesture on iOS/Android) ---- */
-    #startOverlay{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.75); z-index:1000; padding:24px; }
-    #startOverlay .panel{ max-width:720px; width:100%; background:rgba(15,15,15,0.92); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:22px 20px; box-shadow:0 8px 30px rgba(0,0,0,0.45); }
-    #startOverlay h1{ margin:0 0 10px; font-size:18px; letter-spacing:0.02em; }
-    #startOverlay p{ margin:10px 0; font-size:14px; line-height:1.55; opacity:0.92; }
-    #startOverlay .small{ font-size:12px; opacity:0.7; }
-    #btnCam{ appearance:none; border:0; border-radius:12px; padding:14px 16px; font-size:15px; font-weight:700; background:#fff; color:#000; cursor:pointer; width:100%; }
-    #btnCam:disabled{ opacity:0.4; cursor:not-allowed; }
+    /* --- Local Inter fonts (offline) --- */
+    @font-face {
+      font-family: 'InterLocal';
+      src: url('./fonts/Inter-Regular.otf') format('opentype');
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'InterLocal';
+      src: url('./fonts/Inter-Bold.otf') format('opentype');
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+    }
+    /* Trigger font download so document.fonts.ready waits for it */
+    #font-warmup {
+      position: fixed;
+      left: -9999px;
+      top: -9999px;
+      font-family: 'InterLocal', sans-serif;
+      font-weight: 700;
+      font-size: 32px;
+      line-height: 1;
+      opacity: 0;
+      pointer-events: none;
+    }
 
-    /* ---- Optional camera preview (hidden by default) ---- */
-    #camWrap{ position:fixed; left:12px; top:12px; width:280px; height:220px; border-radius:12px; overflow:hidden; border:1px solid rgba(255,255,255,0.18); display:none; z-index:50; background:#000; }
-    #cam{ width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
-    #faceBox{ position:absolute; border:2px solid #2cff65; box-sizing:border-box; display:none; left:0; top:0; width:0; height:0; pointer-events:none; }
-
-    /* ---- Minimal UI ---- */
-    #ui{ position:fixed; left:12px; bottom:12px; z-index:60; width:min(560px, calc(100vw - 24px)); background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px 12px; backdrop-filter: blur(10px); }
-    #ui .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-    #ui .note{ font-size:12px; opacity:0.82; margin:0 0 8px; }
-    #diag{ font-size:12px; opacity:0.9; margin:0; white-space:pre-wrap; }
-    
-    #ui label.chk{ display:inline-flex; gap:6px; align-items:center; font-size:12px; opacity:0.92; user-select:none; }
-    #ui label.chk input{ transform: translateY(0.5px); }
-.btn{ appearance:none; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.08); color:#fff; border-radius:10px; padding:8px 10px; font-size:12px; cursor:pointer; }
-    .btn:active{ transform: translateY(1px); }
-
-    #uiFab{ position:fixed; right:12px; bottom:12px; z-index:61; width:44px; height:44px; border-radius:22px; border:1px solid rgba(255,255,255,0.18); background:rgba(0,0,0,0.55); display:none; cursor:pointer; }
-
-    /* Fullscreen help modal */
-    #fsHelp{ position:fixed; inset:0; display:none; z-index:2000; background:rgba(0,0,0,0.7); }
-    #fsHelp .box{ max-width:640px; margin:10vh auto 0; background:rgba(15,15,15,0.95); border:1px solid rgba(255,255,255,0.12); border-radius:14px; padding:16px; width:calc(100% - 40px); }
-    #fsHelp .box h2{ margin:0 0 8px; font-size:16px; }
-    #fsHelp .box p{ margin:8px 0; font-size:13px; opacity:0.9; line-height:1.55; }
-    #fsHelpClose{ margin-top:10px; }
-  </style>
+    /* --- Viewport / iPad toolbar friendly --- */
+    html, body { width:100%; overflow:hidden; overscroll-behavior: none; }
+    #canvas-holder { width:100vw; height:100dvh; touch-action:none; }
+    @supports (height: 100dvh){
+      #canvas-holder { height:100dvh; }
+    }
+    /* Floating UI toggle (shown when UI hidden) */
+    #uiFab{
+      position:fixed; left:12px; top:12px; right:auto; z-index:99998;
+      width:44px; height:44px; border-radius:12px;
+      border:1px solid rgba(255,255,255,0.25);
+      background:rgba(20,20,20,0.70); color:#fff;
+      font:20px/1 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      display:none;
+      backdrop-filter: blur(4px);
+      box-shadow:0 6px 20px rgba(0,0,0,0.35);
+    }
+    /* Fullscreen help overlay */
+    #fsHelp{
+      position:fixed; inset:0; z-index:99997;
+      background:rgba(0,0,0,0.82);
+      color:#fff;
+      display:none;
+      padding:24px 18px;
+      font:16px/1.55 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+    #fsHelp .panel{
+      max-width:720px;
+      margin:0 auto;
+      background:rgba(20,20,20,0.86);
+      border:1px solid rgba(255,255,255,0.18);
+      border-radius:14px;
+      padding:16px 16px;
+      box-shadow:0 10px 30px rgba(0,0,0,0.45);
+    }
+    #fsHelp .panel h2{ margin:0 0 8px 0; font-size:18px; }
+    #fsHelp .panel ol{ margin:8px 0 0 20px; }
+    #fsHelpClose{
+      margin-top:12px;
+      padding:10px 12px;
+      border-radius:10px;
+      border:1px solid rgba(255,255,255,0.25);
+      background:rgba(255,255,255,0.08);
+      color:#fff;
+      font:14px/1 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+</style>
 </head>
 <body>
+  <span id="font-warmup">0123456789:</span>
 
-  <!-- Start overlay (camera is required) -->
-  <div id="startOverlay">
+  <div id="ui">
+    <div class="note">共有_サボる時計 build v0.2.7</div>
+    <div class="note" id="diag">診断: OK</div>
+
+    <div class="row" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <button id="btnFS">⛶ フルスクリーン</button>
+      <button id="btnHideUI">UIを隠す</button>
+    </div>
+
+    <div class="row">
+      <button id="btnCam">① カメラを許可して開始</button></div>
+<div class="row">
+      <label><input type="checkbox" id="togglePreview"> カメラプレビューを表示（デバッグ用）</label>
+    </div>
+
+    <div class="row">
+      <label><input type="checkbox" id="toggleFaceBox"> 緑枠を表示（デバッグ用）</label>
+    </div>
+
+  </div>
+
+  <button id="uiFab" aria-label="UIを表示">≡</button>
+
+  <div id="fsHelp">
     <div class="panel">
-      <h1>サボる時計（共有版）</h1>
-      <p>この作品は <b>カメラで顔を検出</b> して、「見られている / 見られていない」を判定します。開始するには、下のボタンを押してカメラを許可してください。</p>
-      <button id="btnCam">カメラを許可して開始</button>
-      <p class="small">※カメラのない端末 / 権限が拒否されている場合は動作しません。<br>※HTTPS（GitHub Pages）または localhost でのみカメラが使えます。</p>
+      <h2>フルスクリーンにする</h2>
+      <p>端末によってはページから完全にツールバーを消せない場合があります。iPadは<b>「ホーム画面に追加」</b>が確実です。</p>
+      <button id="fsHelpClose">閉じる</button>
+    </div>
+  </div>
+
+  <!-- Camera preview (debug) -->
+  <div id="camWrap">
+    <div id="camInner">
+      <video id="cam" autoplay playsinline muted></video>
+      <div id="faceBox"></div>
     </div>
   </div>
 
   <div id="canvas-holder"></div>
 
-  <!-- Optional preview (kept for debugging; hidden by default) -->
-  <div id="camWrap" aria-hidden="true">
-    <video id="cam" playsinline autoplay muted></video>
-    <div id="faceBox"></div>
-  </div>
-
-  <!-- Minimal UI -->
-  <div id="ui">
-    <p class="note">共有_サボる時計 v0.2.7 / GitHub Pages 用</p>
-    <div class="row" style="justify-content:space-between; margin-bottom:8px;">
-      <button id="btnFS" class="btn">フルスクリーン</button>
-      <button id="btnHideUI" class="btn">UIを隠す</button>
-    </div>
-    <div class="row" style="gap:16px; margin-bottom:8px;">
-      <label class="chk"><input type="checkbox" id="togglePreview">カメラプレビュー</label>
-      <label class="chk"><input type="checkbox" id="toggleFaceBox">緑枠</label>
-    </div>
-    <p id="diag">診断: 起動中…</p>
-  </div>
-  <button id="uiFab" aria-label="Show UI"></button>
-
-  <!-- Fullscreen help -->
-  <div id="fsHelp">
-    <div class="box">
-      <h2>フルスクリーンについて</h2>
-      <p>端末によってはボタンからフルスクリーンにできないことがあります。可能ならブラウザのメニューから「全画面表示」または「ホーム画面に追加」を使ってください。</p>
-      <button id="fsHelpClose" class="btn">閉じる</button>
-    </div>
-  </div>
-
-  <script src="libs/p5.min.js"></script>
-  <script src="src/main.js"></script>
+  <script src="./libs/p5.min.js"></script>
+  <script src="./src/main.js" defer></script>
 </body>
 </html>

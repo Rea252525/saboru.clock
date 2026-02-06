@@ -1,122 +1,57 @@
 
 (function(){
   'use strict';
-
-  // Filter benign console messages from MediaPipe/TFLite/Environment.
-  // These are not fatal errors, but some browsers highlight them in red which is confusing.
-  (function(){
-    const DROP_PATTERNS = [
-      /Created TensorFlow Lite XNNPACK delegate for CPU/i,
-      /inference_feedback_manager\.cc:\d+\].*Feedback manager requires a model/i,
-      /SES Removing unpermitted intrinsics/i
-    ];
-    function shouldDrop(args){
-      try{
-        const msg = args.map(a => {
-          if (typeof a === 'string') return a;
-          if (a && typeof a.message === 'string') return a.message;
-          try { return JSON.stringify(a); } catch(e){ return String(a); }
-        }).join(' ');
-        return DROP_PATTERNS.some(rx => rx.test(msg));
-      }catch(e){
-        return false;
-      }
-    }
-    ['log','info','warn','error'].forEach(level => {
-      const orig = console[level].bind(console);
-      console[level] = (...args) => {
-        if (shouldDrop(args)) return;
-        orig(...args);
-      };
-    });
-  })();
-
-
-  // small utility: clamp a number into [min,max]
-  function _clamp(v, lo, hi){
-    return Math.max(lo, Math.min(hi, v));
-  }
-
-  // Clip drawing to a (rounded) rectangle in *canvas coordinates*.
-  // Used to ensure we only draw within the visible area (viewRect).
-  function _clipRoundedRect(ctx, rect){
-    if (!ctx || !rect) return;
-    const x = rect.minX || 0;
-    const y = rect.minY || 0;
-    const w = (rect.maxX || 0) - x;
-    const h = (rect.maxY || 0) - y;
-    const r0 = Math.max(0, rect.r || 0);
-
-    ctx.beginPath();
-    if (w <= 0 || h <= 0){
-      // Degenerate; clip nothing.
-      ctx.rect(0, 0, 0, 0);
-      ctx.clip();
-      return;
-    }
-
-    const r = Math.min(r0, Math.min(w, h) * 0.5);
-
-    // Modern browsers: CanvasRenderingContext2D.roundRect exists.
-    if (r > 0 && typeof ctx.roundRect === 'function'){
-      ctx.roundRect(x, y, w, h, r);
-    } else if (r > 0){
-      // Fallback: manual rounded-rect path.
-      const rr = r;
-      ctx.moveTo(x + rr, y);
-      ctx.lineTo(x + w - rr, y);
-      ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-      ctx.lineTo(x + w, y + h - rr);
-      ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-      ctx.lineTo(x + rr, y + h);
-      ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-      ctx.lineTo(x, y + rr);
-      ctx.quadraticCurveTo(x, y, x + rr, y);
-      ctx.closePath();
-    } else {
-      // Simple rect clip.
-      ctx.rect(x, y, w, h);
-    }
-    ctx.clip();
-  }
-
-  // Apply a simple scale transform to target points around (cx,cy).
-  // Used for the tall layout to make HH/MM slightly vertically elongated.
-  function _stretchTargets(targets, cx, cy, sx, sy){
-    if (!targets || !targets.length) return;
-    for (let i=0; i<targets.length; i++){
-      const t = targets[i];
-      if (!t) continue;
-      t.x = cx + (t.x - cx) * sx;
-      t.y = cy + (t.y - cy) * sy;
-    }
-  }
-
   function boot(){
     // ---------------- Config ----------------
     const UA = navigator.userAgent || '';
     const IS_IOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     const IS_IPAD = /iPad/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    const IS_ANDROID = /Android/i.test(UA);
-    const IS_MOBILE = IS_IOS || IS_ANDROID;
-    const SMALL_SCREEN = Math.min(window.innerWidth || 0, window.innerHeight || 0) > 0
-      ? (Math.min(window.innerWidth, window.innerHeight) < 720)
-      : false;
-    const DEVICE_MEM = (typeof navigator.deviceMemory === 'number') ? navigator.deviceMemory : null; // GB (Chromium only)
-    const CORES = (typeof navigator.hardwareConcurrency === 'number') ? navigator.hardwareConcurrency : null;
+    // iPadはGPU/CPU負荷が上がりやすいので、デフォルトは軽量モード（見た目はほぼ維持）
+    const PERF_MODE = IS_IOS;
+    const DPR = PERF_MODE ? 1 : Math.min(window.devicePixelRatio || 1, 2);
 
-    // ---- Auto performance tier (no user settings needed) ----
-    // 0: desktop/high, 1: mobile normal, 2: mobile low-end
-    let PERF_LEVEL = 0;
-    if (IS_MOBILE) PERF_LEVEL = 1;
-    if (IS_MOBILE && SMALL_SCREEN) PERF_LEVEL = 2;
-    if (DEVICE_MEM !== null && DEVICE_MEM <= 4) PERF_LEVEL = Math.max(PERF_LEVEL, 1);
-    if (DEVICE_MEM !== null && DEVICE_MEM <= 3) PERF_LEVEL = 2;
-    if (CORES !== null && CORES <= 4) PERF_LEVEL = Math.max(PERF_LEVEL, 1);
-    if (CORES !== null && CORES <= 2) PERF_LEVEL = 2;
 
-    const PERF_MODE = (PERF_LEVEL > 0);
-    let DPR = (PERF_LEVEL >= 1) ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+    // --- helpers (share build) ---
+    function _clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+    function _stretchTargets(targets, cx, cy, sx, sy){
+      if (!targets || !targets.length) return;
+      for (let i=0; i<targets.length; i++){
+        const t = targets[i];
+        if (!t) continue;
+        t.x = cx + (t.x - cx) * sx;
+        t.y = cy + (t.y - cy) * sy;
+      }
+    }
+
+    // Clipping helper for the blob render
+    function _clipRoundedRect(ctx, rect){
+      const x = rect.minX, y = rect.minY;
+      const w = rect.maxX - rect.minX;
+      const h = rect.maxY - rect.minY;
+      const r = Math.max(0, rect.r || 0);
+      ctx.beginPath();
+      if (r > 0 && typeof ctx.roundRect === 'function'){
+        ctx.roundRect(x, y, w, h, r);
+      } else if (r > 0){
+        const rr = Math.min(r, w*0.5, h*0.5);
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        ctx.lineTo(x + rr, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+        ctx.lineTo(x, y + rr);
+        ctx.quadraticCurveTo(x, y, x + rr, y);
+        ctx.closePath();
+      } else {
+        ctx.rect(x, y, w, h);
+      }
+      ctx.clip();
+    }
+
+    let layoutInfo = null;
 
 	    // ---- SLIME renderer params (guided) ----
 	    // v0.0.0 の描写前提の定数を復活（未定義エラー回避 & 画質の基準）
@@ -133,29 +68,24 @@
 	    let fontSize = 280;
 
     // Slime / blob buffer budget (pixels).
-    // 1920x1080(=2,073,600px) のとき、blobScale が
-    //   - PERF_LEVEL 0: 2
-    //   - PERF_LEVEL 1: 4
-    //   - PERF_LEVEL 2: 5
-    // くらいになるようにして、スマホで自動的に軽くする。
+    // 1920x1080(=2,073,600px) で blobScale が基本 2 になるように設定。
     // resize() 内で blobScale = ceil(sqrt(area / MAX_BLOB_PIXELS)) を使う。
-    let MAX_BLOB_PIXELS = (PERF_LEVEL === 0) ? 540000 : (PERF_LEVEL === 1 ? 220000 : 120000);
-
-    // Render budgets (skip some particles when drawing the blob to keep it smooth on mobile)
-    let RENDER_BUDGET_H = (PERF_LEVEL === 0) ? 1400 : (PERF_LEVEL === 1 ? 340 : 240);
-    let RENDER_BUDGET_M = (PERF_LEVEL === 0) ? 1400 : (PERF_LEVEL === 1 ? 340 : 240);
-    let RENDER_BUDGET_C = (PERF_LEVEL === 0) ? 90   : (PERF_LEVEL === 1 ? 70  : 55);
-    const ENABLE_OUTLINE_PASS = (PERF_LEVEL === 0);
-    const GUIDE_STRIDE_BASE = (PERF_LEVEL === 0) ? 4 : (PERF_LEVEL === 1 ? 8 : 10);
+    const MAX_BLOB_PIXELS = PERF_MODE ? 220000 : 540000;
+    // Particle allocation (seconds are removed (v0.5.6))
+    // Render budgets (skip some particles when drawing the blob to keep it smooth on iPad)
+    const RENDER_BUDGET_H = PERF_MODE ? 340 : 1400;
+    const RENDER_BUDGET_M = PERF_MODE ? 340 : 1400;
+    const RENDER_BUDGET_C = PERF_MODE ? 70  : 90;
+    const ENABLE_OUTLINE_PASS = !PERF_MODE;
+    const GUIDE_STRIDE_BASE = PERF_MODE ? 8 : 4;
 
     const HN = 770, MN = 770;
     const CN = 110;          // colon ":" allocation
     const N  = HN + MN + CN; // total
     const IDLE_JITTER = 0.35, SEEK_STRENGTH = 0.085, DAMP = 0.78;
-    let DETECT_MIN_INTERVAL_MS = (PERF_LEVEL === 0) ? 110 : (PERF_LEVEL === 1 ? 170 : 230);
-    const SEEN_DEBOUNCE_MS = 180;
-    const FRAME_RATE_TARGET = (PERF_LEVEL === 0) ? 60 : (PERF_LEVEL === 1 ? 55 : 50);
+    const DETECT_MIN_INTERVAL_MS = PERF_MODE ? 160 : 110, SEEN_DEBOUNCE_MS = 180;
     const LOST_CONFIRM_STREAK = 2; // 連続「未検知」回数で見失い確定（検出の瞬断を吸収）
+    const HIT_CONFIRM_STREAK = 2;  // 連続「検知」回数で見つけた確定（誤検知を弾く）
 
     // 見失い時の「パキッ」を防ぐためのスムーズ切替（ms）
     // ②-a の最中・後でも、未検知になった瞬間からじわっとサボり(IDLE)へ。
@@ -263,13 +193,13 @@ let enter = null;         // {type,start,end,...}
 
 
       // Camera state
-      const cam = { enabled:false, preview:false, showBox:false, starting:false,
+      const cam = { enabled:false, preview:false,
                     video: document.getElementById('cam'),
                     wrap: document.getElementById('camWrap'),
                     inner: document.getElementById('camInner'),
                     previewMirror:true,
                     faceBox: document.getElementById('faceBox'),
-                    stream:null, detector:null, api:'none', lastSeenAt: 0, lastDetectAt: 0, noFaceStreak: 0,
+                    stream:null, detector:null, api:'none', lastSeenAt: 0, lastDetectAt: 0, noFaceStreak: 0, hitStreak: 0,
                     face:{has:false,cx:0.5,cy:0.5,size:0.22,w:0,h:0}, faceAt:0 };
 
       function hideFaceBox(){
@@ -280,7 +210,7 @@ let enter = null;         // {type,start,end,...}
       // This avoids drift caused by layout/padding/aspect differences.
       function updateFaceBoxFromBB(bb, vw, vh){
         if (!cam.faceBox || !cam.video) return;
-        if (!cam.preview || !cam.showBox){ cam.faceBox.style.display = 'none'; cam._faceBoxSmooth = null; return; }
+        if (!cam.preview){ cam.faceBox.style.display = 'none'; cam._faceBoxSmooth = null; return; }
         const inner = cam.inner || cam.video.parentElement;
         if (!inner) return;
 
@@ -403,13 +333,14 @@ let enter = null;         // {type,start,end,...}
         cam.faceBox.style.top  = boxT.toFixed(1) + 'px';
         cam.faceBox.style.width  = s.toFixed(1) + 'px';
         cam.faceBox.style.height = s.toFixed(1) + 'px';
-        cam.faceBox.style.display = 'block';
+        cam.faceBox.style.display = (cam.faceBoxEnabled ? 'block' : 'none');
       }
 
       // UI
       const holder = document.getElementById('canvas-holder');
-      const startOverlay = document.getElementById('startOverlay');
       const btnCam = document.getElementById('btnCam');
+      const togglePreview = document.getElementById('togglePreview');
+      const toggleFaceBox = document.getElementById('toggleFaceBox');
       const diag = document.getElementById('diag');
 
       // Fullscreen & UI visibility (for exhibition)
@@ -420,65 +351,57 @@ let enter = null;         // {type,start,end,...}
       const fsHelp = document.getElementById('fsHelp');
       const fsHelpClose = document.getElementById('fsHelpClose');
 
-      // Preview toggles (camera preview + face box)
-      const togglePreview = document.getElementById('togglePreview');
-      const toggleFaceBox = document.getElementById('toggleFaceBox');
-
-      function applyPreviewUI(){
-        if (cam.wrap){ cam.wrap.style.display = cam.preview ? 'block' : 'none'; }
-        if (!cam.preview){ hideFaceBox(); }
+      // Persist minimal UI state so an accidental reload returns to the exhibition setup.
+      // v2.1.1: migrate from v2.1.0 key → v2.1.1 key (read old if new is empty)
+      const LS_KEY = 'sabo_sh_state_v0_2_7';
+      const LS_KEY_OLD = 'sabo_sh_state_v0_2_6';
+      function loadPersistedState(){
+        try{
+          const raw = localStorage.getItem(LS_KEY);
+          if (raw) return JSON.parse(raw);
+          const rawOld = localStorage.getItem(LS_KEY_OLD);
+          if (rawOld) return JSON.parse(rawOld);
+          return null;
+        }catch(e){ return null; }
       }
-      function applyFaceBoxUI(){
-        if (!cam.showBox){ hideFaceBox(); }
+      let _persisted = loadPersistedState();
+      let _saveTimer = null;
+      function savePersistedStateSoon(){
+        if (typeof localStorage === 'undefined') return;
+        if (_saveTimer) return;
+        _saveTimer = setTimeout(()=>{
+          _saveTimer = null;
+          try{
+            const st = {
+              uiVisible: uiBox ? (uiBox.style.display !== 'none') : true,              togglePreview: togglePreview ? !!togglePreview.checked : false,
+              toggleFaceBox: toggleFaceBox ? !!toggleFaceBox.checked : false
+            };
+            localStorage.setItem(LS_KEY, JSON.stringify(st));
+          }catch(e){}
+        }, 120);
       }
 
-      // Load saved preferences
-      try{
-        const pv = localStorage.getItem('saboclock_preview');
-        const fb = localStorage.getItem('saboclock_facebox');
-        cam.preview = (pv === '1');
-        cam.showBox = (fb === '1');
-      }catch(e){}
-
-      if (togglePreview){
-        togglePreview.checked = cam.preview;
-        togglePreview.addEventListener('change', ()=>{
-          cam.preview = !!togglePreview.checked;
-          try{ localStorage.setItem('saboclock_preview', cam.preview ? '1' : '0'); }catch(e){}
-          // If preview is turned off, also turn off face box UI (it depends on preview)
-          if (!cam.preview && toggleFaceBox){
-            toggleFaceBox.checked = false;
-            cam.showBox = false;
-            try{ localStorage.setItem('saboclock_facebox', '0'); }catch(e){}
+      // Wake Lock (supported browsers only) – helps prevent the display from sleeping.
+      let _wakeLock = null;
+      async function requestWakeLock(){
+        try{
+          if (!('wakeLock' in navigator)) return;
+          if (_wakeLock) return;
+          _wakeLock = await navigator.wakeLock.request('screen');
+          if (_wakeLock && _wakeLock.addEventListener){
+            _wakeLock.addEventListener('release', ()=>{ _wakeLock = null; });
           }
-          applyPreviewUI();
-        });
+        }catch(e){}
       }
-      if (toggleFaceBox){
-        toggleFaceBox.checked = cam.showBox;
-        toggleFaceBox.addEventListener('change', ()=>{
-          cam.showBox = !!toggleFaceBox.checked;
-          try{ localStorage.setItem('saboclock_facebox', cam.showBox ? '1' : '0'); }catch(e){}
-          // Turning face box on implies preview on
-          if (cam.showBox){
-            cam.preview = true;
-            if (togglePreview) togglePreview.checked = true;
-            try{ localStorage.setItem('saboclock_preview', '1'); }catch(e){}
-          }
-          applyPreviewUI();
-          applyFaceBoxUI();
-        });
-      }
-
-      // Apply initial UI visibility
-      applyPreviewUI();
-      applyFaceBoxUI();
-
+      document.addEventListener('visibilitychange', ()=>{
+        if (document.visibilityState === 'visible') requestWakeLock();
+      });
 
       function setUIVisible(v){
         if (!uiBox) return;
         uiBox.style.display = v ? 'block' : 'none';
         if (uiFab) uiFab.style.display = v ? 'none' : 'block';
+        savePersistedStateSoon();
       }
       function showFsHelp(v){
         if (!fsHelp) return;
@@ -502,11 +425,53 @@ let enter = null;         // {type,start,end,...}
         }
       }
 
+      // Apply persisted state now that helper functions exist.
+      if (_persisted){        if (togglePreview && typeof _persisted.togglePreview === 'boolean') togglePreview.checked = _persisted.togglePreview;
+        if (toggleFaceBox && typeof _persisted.toggleFaceBox === 'boolean') toggleFaceBox.checked = _persisted.toggleFaceBox;
+        if (typeof _persisted.uiVisible === 'boolean') setUIVisible(_persisted.uiVisible);
+      }
+
       if (btnHideUI){ btnHideUI.addEventListener('click', ()=> setUIVisible(false)); }
       if (uiFab){ uiFab.addEventListener('click', ()=> setUIVisible(true)); }
-      if (btnFS){ btnFS.addEventListener('click', ()=>{ requestFullscreenSmart(); }); }
+      if (btnFS){ btnFS.addEventListener('click', ()=>{ requestWakeLock(); requestFullscreenSmart(); }); }
       if (fsHelpClose){ fsHelpClose.addEventListener('click', ()=> showFsHelp(false)); }
       if (fsHelp){ fsHelp.addEventListener('click', (e)=>{ if (e.target === fsHelp) showFsHelp(false); }); }
+
+      // v2.1.1: camera auto-start + auto-resume (after permission is granted once)
+      // Goal: after the first permission grant, the camera should continue automatically on reload/return.
+      let _camStartPromise = null;
+      const LS_CAM_GRANTED = 'mon_saboru_cam_granted';
+
+      function _isStreamLive(){
+        try{
+          if (!cam.stream) return false;
+          const tracks = (cam.stream.getVideoTracks ? cam.stream.getVideoTracks() : []);
+          if (!tracks || tracks.length === 0) return false;
+          return tracks.some(t => t && t.readyState === 'live');
+        }catch(_e){ return false; }
+      }
+
+      function _camWasGranted(){
+        try{ return localStorage.getItem(LS_CAM_GRANTED) === '1'; }catch(_e){ return false; }
+      }
+
+      async function ensureCameraRunning(reason){
+        const AUTO_PROMPT_FIRST_TIME = true;
+        if (!AUTO_PROMPT_FIRST_TIME && !_camWasGranted()) return;
+        if (_camStartPromise) return _camStartPromise;
+        if (cam.enabled && _isStreamLive()) return;
+        _camStartPromise = startCamera({ auto:true, reason, force:true })
+          .finally(()=>{ _camStartPromise = null; });
+        return _camStartPromise;
+      }
+
+      // Auto-resume when the page becomes visible again (macOS/Safari/Chrome can pause camera on background)
+      window.addEventListener('pageshow', ()=>{ if (document.visibilityState === 'visible') ensureCameraRunning('pageshow'); }, { capture:true });
+      document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState === 'visible') ensureCameraRunning('visible'); });
+
+      // Boot: try to resume (after a small delay so layout settles)
+      setTimeout(()=>ensureCameraRunning('boot'), 250);
+
 
 
 // ENTER②-a parameters (tuning UI was removed for v1.2.x)
@@ -548,145 +513,34 @@ function updateSoftLost(now){
 
 
 
-// Shared version: camera is mandatory (no simulation mode)
-      if (btnCam){
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-          btnCam.disabled = true;
-          btnCam.textContent = 'この端末ではカメラを開始できません';
-        } else {
-          btnCam.addEventListener('click', startCamera);
-        }
-      }
+// (v1.2.0) debug/test UI removed
 
-      function updateDiag(text){
-        if (!diag) return;
-        if (typeof text === 'string'){
-          diag.textContent = text;
+
+
+
+      // Keep the camera <video> active even when preview is OFF.
+      // Some browsers may pause the stream if the element is display:none.
+      function applyPreviewVisibility(){
+        if (!cam || !cam.wrap) return;
+        if (!cam.enabled){
+          cam.wrap.style.display = 'none';
           return;
         }
-        const secureOk = window.isSecureContext || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-        const now = performance.now();
-        const camSeen = cam.enabled ? ((now - cam.lastSeenAt <= SEEN_DEBOUNCE_MS) && ((cam.noFaceStreak||0) < LOST_CONFIRM_STREAK)) : false;
-        let msg = '診断: ';
-        if (!secureOk) msg += 'HTTPS/localhost が必要';
-        else if (!cam.enabled) msg += 'カメラ未開始（ボタンを押してください）';
-        else msg += camSeen ? '見られている' : '見られていない';
+        // Always keep it in the render tree
+        cam.wrap.style.display = 'block';
 
-        // show auto performance tier (helps when testing on phones)
-        if (PERF_LEVEL === 0) msg += ' / 軽量:OFF';
-        else if (PERF_LEVEL === 1) msg += ' / 軽量:ON';
-        else msg += ' / 軽量:強';
-        diag.textContent = msg;
-      }
-
-      // Canvas + slime buffer
-      let gBlob = null, blobScale = 4;
-
-// Rendering params (minimal)
-const renderTint = {r:255,g:255,b:255,a:255};
-const renderRadiusScale = 1.0;
-const renderColonSpeed = 1.0;
-
-
-      function resize(){
-        p.resizeCanvas(1920, 1080);
-        // Decide blob resolution
-        const area = p.width * p.height;
-        blobScale = Math.max(2, Math.ceil(Math.sqrt(area / MAX_BLOB_PIXELS)));
-        const bw = Math.max(64, Math.floor(p.width / blobScale));
-        const bh = Math.max(64, Math.floor(p.height / blobScale));
-        gBlob = p.createGraphics(bw, bh);
-        gBlob.pixelDensity(DPR);
-        layoutInitial(); rebuildTargets();
-      }
-      let fitScale = 1.0;
-
-      // Visible rectangle in *canvas coordinates* (canvas is CSS-scaled to COVER the screen).
-      // Shared version rule: device active area == clock region (walls).
-      let viewRect = { minX: 0, maxX: 1920, minY: 0, maxY: 1080, r: 0 };
-
-      // Computed layout info derived from viewRect (shared version)
-      let layoutInfo = null;
-
-
-      function updateViewRect(){
-        const vv = window.visualViewport;
-        const vw = vv ? vv.width : window.innerWidth;
-        const vh = vv ? vv.height : window.innerHeight;
-
-        // COVER scale: fill the viewport while keeping 16:9 canvas.
-        fitScale = Math.max(vw / 1920, vh / 1080);
-
-        const visW = vw / fitScale;
-        const visH = vh / fitScale;
-
-        const cx = 1920 * 0.5;
-        const cy = 1080 * 0.5;
-
-        viewRect = {
-          minX: cx - visW * 0.5,
-          maxX: cx + visW * 0.5,
-          minY: cy - visH * 0.5,
-          maxY: cy + visH * 0.5,
-          r: 0
-        };
-
-        // clamp
-        viewRect.minX = Math.max(0, viewRect.minX);
-        viewRect.maxX = Math.min(1920, viewRect.maxX);
-        viewRect.minY = Math.max(0, viewRect.minY);
-        viewRect.maxY = Math.min(1080, viewRect.maxY);
-      }
-
-      let _rebuildScheduled = false;
-      function _scheduleRebuildTargets(){
-        if (_rebuildScheduled) return;
-        _rebuildScheduled = true;
-        requestAnimationFrame(()=>{
-          _rebuildScheduled = false;
-          if (typeof rebuildTargets === 'function' && pts && pts.length) rebuildTargets();
-        });
-      }
-
-      function applyFitScale(){
-        updateViewRect();
-        const c = holder.querySelector('canvas');
-        if (c){
-          c.style.position = 'absolute';
-          c.style.left = '50%';
-          c.style.top  = '50%';
-          c.style.transform = `translate(-50%, -50%) scale(${fitScale})`;
-          c.style.transformOrigin = 'center center';
-        }
-        _scheduleRebuildTargets();
-      }
-
-      p.setup = function(){
-
-        const c = p.createCanvas(1920, 1080); c.parent(holder); applyFitScale();
-        window.addEventListener('resize', applyFitScale, {passive:true});
-        if (window.visualViewport){ window.visualViewport.addEventListener('resize', applyFitScale, {passive:true}); }
-        p.pixelDensity(DPR);
-        p.frameRate(FRAME_RATE_TARGET);
-        resize();
-        const waitFonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
-        waitFonts.then(()=>{ rebuildTargets(); setTimeout(rebuildTargets, 0); });
-        updateDiag();
-      };
-
-      function layoutInitial(){
-        for (let i=0;i<N;i++){
-          const g = (i < HN) ? 0 : (i < HN + MN ? 1 : 2);
-          const pad = Math.max(2, DISC_RADIUS * 0.9);
-          const minX = viewRect.minX + pad;
-          const maxX = viewRect.maxX - pad;
-          const minY = viewRect.minY + pad;
-          const maxY = viewRect.maxY - pad;
-          const rw = Math.max(1, maxX - minX);
-          const rh = Math.max(1, maxY - minY);
-          pts[i].x = minX + Math.random()*rw; pts[i].y = minY + Math.random()*rh;
-          pts[i].vx = pts[i].vy = 0; pts[i].group = g;
-          pts[i].activeAt = 0; pts[i].ax = pts[i].x; pts[i].ay = pts[i].y; pts[i].catchUntil = 0;
+        if (cam.preview){
+          cam.wrap.style.opacity = '1';
+          cam.wrap.style.pointerEvents = 'auto';
+          cam.wrap.style.borderColor = 'rgba(255,255,255,0.18)';
+          cam.wrap.style.background = 'rgba(0,0,0,0.25)';
+        } else {
+          // Almost invisible, but still rendered (keeps video frames updating)
+          cam.wrap.style.opacity = '0.001';
+          cam.wrap.style.pointerEvents = 'none';
+          cam.wrap.style.borderColor = 'transparent';
+          cam.wrap.style.background = 'transparent';
+          if (cam.faceBox) cam.faceBox.style.display = 'none';
         }
       }
 
@@ -747,131 +601,80 @@ const renderColonSpeed = 1.0;
         for (const ch of text){ digitPath(ch,x); x+=digW+gap; }
         g.pop();
       }
-      function buildTargetsFor(text, maxCount, xCenter, yCenter, fontSize, isGuide){
-        // Make an offscreen buffer just wide enough for the given font size.
-        const estW = Math.ceil(fontSize * (text.length * 0.9 + 1.2));
-        const gW = Math.max(10, Math.min(p.width, estW));
-        const g = p.createGraphics(gW, p.height);
-        g.pixelDensity(1);
+
+      function buildTargetsFor(text, maxCount, xCenter, yCenter){
+        // Reuse the same offscreen canvas to prevent GPU/DOM canvas churn.
+        const g = ensureSampleBuffer();
         g.clear();
-
-        // Prefer font rendering.
-        drawFontDigits(g, text, fontSize, g.width*0.5, yCenter);
-
+        g.background(0,0);
+        (USE_FONT ? drawFontDigits : drawVectorDigits)(g, text, fontSize, g.width/2, yCenter);
         g.loadPixels();
-        const d = 1;
-        const W = g.width * d;
-        const H = g.height * d;
-        const step = Math.max(1, Math.floor(Math.min(p.width, p.height) * 0.0035));
-
-        const arr = [];
-        for (let y = 0; y < H; y += step){
-          for (let x = 0; x < W; x += step){
-            const idx = 4*(y*W + x);
-            const a = g.pixels[idx + 3];
-            if (a > 128){
-              arr.push({
-                x: (x/d) + (xCenter - g.width*0.5),
-                y: (y/d),
-                g: !!isGuide
-              });
-            }
+        const d=g.pixelDensity(), W=g.width*d, H=g.height*d;
+        let step=Math.max(2, Math.floor(Math.min(p.width,p.height)*0.0035)*d); // denser than v0.8.0
+        const arr=[];
+        for (let y=0;y<H;y+=step){
+          for (let x=0;x<W;x+=step){
+            const a=g.pixels[4*(y*W+x)+3];
+            if (a>128){ arr.push({x: x/d + (xCenter - g.width/2), y: y/d}); }
           }
         }
-
-        // Random sample (stable enough for our use).
-        if (arr.length > maxCount){
-          for (let i = arr.length - 1; i > 0; i--){
-            const j = Math.floor(Math.random() * (i + 1));
-            const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
-          }
-          arr.length = maxCount;
+        if (arr.length>maxCount){
+          const stride=Math.max(1, Math.ceil(arr.length/maxCount));
+          const thin=[]; for (let i=0;i<arr.length;i+=stride) thin.push(arr[i]); return thin;
         }
-
         return arr;
       }
-      function buildTargetsForHColon(maxCount, xCenter, yCenter, fontSize, isGuide){
-        // Horizontal two-dots colon: ".."
-        const gW = Math.max(10, Math.min(p.width, Math.ceil(fontSize * 2.4)));
+
+      function buildTargetsForHColon(maxCount, xCenter, yCenter, colonFont){
+        const gW = Math.max(10, Math.min(p.width, Math.ceil(colonFont * 2.4)));
         const g = p.createGraphics(gW, p.height);
         g.pixelDensity(1);
-        // IMPORTANT: keep the background transparent.
-        // We sample by alpha channel, so using background(0) would make the whole buffer opaque,
-        // causing targets to fill the entire area (dots become invisible). 
         g.clear();
-
-        const dotR = fontSize * 0.14;
-        // Gap between the two dots. User feedback: 0.55 was too tight on tall (phone portrait).
-        // Keep within the glyph buffer width (gW ≈ fontSize*2.4), so 0.75 is a safe increase.
-        const gap = fontSize * 0.75;
-
-        g.noStroke();
-        g.fill(255);
-        g.circle(gW / 2 - gap / 2, yCenter, dotR * 2);
-        g.circle(gW / 2 + gap / 2, yCenter, dotR * 2);
-
+        const dotR = colonFont * 0.14;
+        const gap = colonFont * 0.75; // user-chosen spacing
+        g.noStroke(); g.fill(255);
+        g.circle(gW/2 - gap/2, yCenter, dotR*2);
+        g.circle(gW/2 + gap/2, yCenter, dotR*2);
         g.loadPixels();
         const d = 1;
         const W = g.width;
         const H = g.height;
-        // For small glyphs (dots), use a finer sampling stride so we get enough unique targets.
-        const step = Math.max(1, Math.floor(fontSize * 0.04));
-
-        const arr = [];
-        for (let y = 0; y < H; y += step){
-          for (let x = 0; x < W; x += step){
-            const idx = 4 * (y * W + x);
-            const a = g.pixels[idx + 3];
-            if (a > 128){
-              arr.push({
-                x: x + (xCenter - gW / 2),
-                y: y,
-                g: !!isGuide
-              });
-            }
+        const step = Math.max(1, Math.floor(colonFont * 0.04));
+        const arr=[];
+        for (let y=0;y<H;y+=step){
+          for (let x=0;x<W;x+=step){
+            const a=g.pixels[4*(y*W+x)+3];
+            if (a>128){ arr.push({x: x + (xCenter - gW/2), y: y}); }
           }
         }
-
         // deterministic-ish shuffle
-        for (let i = arr.length - 1; i > 0; i--){
-          const j = Math.floor(p.random(i + 1));
-          const tmp = arr[i];
-          arr[i] = arr[j];
-          arr[j] = tmp;
+        for (let i=arr.length-1;i>0;i--){
+          const j=Math.floor(p.random(i+1));
+          const tmp=arr[i]; arr[i]=arr[j]; arr[j]=tmp;
         }
-
-        arr.length = Math.min(maxCount, arr.length);
-        for (let i = 0; i < arr.length; i++) arr[i].i = i;
+        if (arr.length>maxCount) arr.length=maxCount;
         return arr;
       }
 
-      function rebuildTargets(){
+function rebuildTargets(){
         // Responsive layout derived from the *visible* area (viewRect).
         const vw = viewRect.maxX - viewRect.minX;
         const vh = viewRect.maxY - viewRect.minY;
         const cx = (viewRect.minX + viewRect.maxX) * 0.5;
         const cy = (viewRect.minY + viewRect.maxY) * 0.5;
         const ar = vh / Math.max(1, vw);
-
         const mode = (ar >= 1.18) ? 'tall' : 'wide';
 
         if (mode === 'wide'){
-          // Wide layout (PC / tablet landscape): keep a strong presence without over-spacing on ultra-wide screens.
           const padX = Math.max(24, vw * 0.06);
           const padY = Math.max(24, vh * 0.06);
 
-          // Size is limited by both height and width so it doesn't get too huge on 16:9 / ultrawide,
-          // and doesn't collapse on smaller laptops. (Shared version prefers slightly smaller digits.)
-          // Wide (landscape): make digits a bit smaller across all aspect ratios.
-          let sizeHM = _clamp(Math.min(vh * 0.55, vw * 0.265), 160, 680);
-          // Also respect vertical padding.
+          let sizeHM = _clamp(Math.min(vh * 0.55, vw * 0.255), 160, 680);
           sizeHM = Math.min(sizeHM, Math.max(120, (vh - padY * 2) * 0.95));
 
-          // Digit spacing: tie primarily to size (stable across very wide screens), but also ensure it fits within viewRect.
-          const digitHalfW = sizeHM * 0.54; // heuristic for "88" width / 2
+          const digitHalfW = sizeHM * 0.54;
           const dxLimit = Math.max(sizeHM * 0.56, (vw * 0.5) - padX - digitHalfW);
-          // Give a bit more breathing room between H and M on wide screens.
-          const dx = Math.min(sizeHM * 0.86, dxLimit);
+          const dx = Math.min(sizeHM * 0.90, dxLimit); // slightly wider gap (v0.2.6 feedback)
 
           layoutInfo = {
             mode, cx, cy, viewW: vw, viewH: vh,
@@ -880,8 +683,7 @@ const renderColonSpeed = 1.0;
             C: { x: cx, y: cy - sizeHM * 0.06, size: sizeHM * 0.33, style: 'v' }
           };
         } else {
-          // Tall (portrait): slightly smaller digits.
-          const sizeHM = _clamp(Math.min(vw * 0.90, vh * 0.27), 140, 540);
+          const sizeHM = _clamp(Math.min(vw * 0.90, vh * 0.26), 140, 540);
           const dy = sizeHM * 0.82;
           layoutInfo = {
             mode, cx, cy, viewW: vw, viewH: vh,
@@ -899,22 +701,24 @@ const renderColonSpeed = 1.0;
         const HH = str.slice(0,2);
         const MM = str.slice(2,4);
 
+        let txH = [], txM = [], txColon = [];
         FONT_WEIGHT = WEIGHT_HM;
-        const hmFontH = Math.round(layoutInfo.H.size);
-        let txH = buildTargetsFor(HH, HN, Math.round(layoutInfo.H.x), Math.round(layoutInfo.H.y), hmFontH, true);
+        fontSize = Math.round(layoutInfo.H.size);
+        txH = buildTargetsFor(HH, HN, Math.round(layoutInfo.H.x), Math.round(layoutInfo.H.y));
 
         FONT_WEIGHT = WEIGHT_HM;
-        const hmFontM = Math.round(layoutInfo.M.size);
-        let txM = buildTargetsFor(MM, MN, Math.round(layoutInfo.M.x), Math.round(layoutInfo.M.y), hmFontM, false);
+        fontSize = Math.round(layoutInfo.M.size);
+        txM = buildTargetsFor(MM, MN, Math.round(layoutInfo.M.x), Math.round(layoutInfo.M.y));
 
         FONT_WEIGHT = WEIGHT_COLON;
         const colonFont = Math.round(layoutInfo.C.size);
-        let txColon = [];
+        fontSize = colonFont;
         if (layoutInfo.C.style === 'v'){
-          txColon = buildTargetsFor(':', CN, Math.round(layoutInfo.C.x), Math.round(layoutInfo.C.y), colonFont, true);
+          txColon = buildTargetsFor(':', CN, Math.round(layoutInfo.C.x), Math.round(layoutInfo.C.y));
         } else {
-          txColon = buildTargetsForHColon(CN, Math.round(layoutInfo.C.x), Math.round(layoutInfo.C.y), colonFont, true);
+          txColon = buildTargetsForHColon(CN, Math.round(layoutInfo.C.x), Math.round(layoutInfo.C.y), colonFont);
         }
+
         // Portrait/tall requirement: HH & MM slightly vertically stretched.
         if (layoutInfo.mode === 'tall'){
           _stretchTargets(txH, layoutInfo.H.x, layoutInfo.H.y, 1.00, 1.15);
@@ -936,7 +740,9 @@ const renderColonSpeed = 1.0;
 
         guides = txH.concat(txM, txColon);
 
-        // Bounds (legacy/debug)
+        // bounds calc (kept)
+        const cx0 = cx;
+        const cy0 = cy;
         const xs = [];
         const ys = [];
         for (let i=0; i<guides.length; i++){
@@ -957,11 +763,12 @@ const renderColonSpeed = 1.0;
           const minY = ys[trim];
           const maxY = ys[ys.length - 1 - trim];
           const EXTRA = Math.ceil(DISC_RADIUS * 0.85 + BLUR_AMOUNT * 0.40 + 2);
-          const halfW = Math.max(cx - minX, maxX - cx) + EXTRA;
-          const halfH = Math.max(cy - minY, maxY - cy) + EXTRA;
+          const halfW = Math.max(cx0 - minX, maxX - cx0) + EXTRA;
+          const halfH = Math.max(cy0 - minY, maxY - cy0) + EXTRA;
           clockBounds = { halfW, halfH };
         }
       }
+
 
 // cached guide points
       let guides = [];
@@ -1032,8 +839,8 @@ function startEnter(type, now){
       const quad = quads[Math.floor(Math.random()*quads.length)];
 
       // 各チームの中心（rebuildTargets内の値と一致させる）
-      const center = (team==='H') ? {x:layoutInfo.H.x, y:layoutInfo.H.y} :
-                                    {x:layoutInfo.M.x, y:layoutInfo.M.y};
+      const center = (team==='H') ? {x:560,y:580} :
+                                    {x:1360,y:580};
 
       const start = (team==='H') ? 0 : HN;
       const count = (team==='H') ? HN : MN;
@@ -1225,33 +1032,78 @@ function startEnter(type, now){
         });
         return mpInitPromise;
       }
-      async function startCamera(){
+
+            async function startCamera(opts){
+        opts = opts || {};
+        const force = !!opts.force;
+
+        // If already live and not forcing a restart, do nothing
+        if (!force && cam.enabled && _isStreamLive()) return;
+
         try{
-          if (cam.starting) return;
-          if (cam.enabled && cam.stream) { updateDiag(); return; }
-          cam.starting = true;
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-            updateDiag('診断: getUserMedia（カメラ）が使えません');
-            return;
-          }
-          const secureOk = window.isSecureContext || location.hostname==='localhost' || location.hostname==='127.0.0.1';
-          if (!secureOk){
-            updateDiag('診断: HTTPS か localhost が必要です');
-            return;
+          updateDiag('診断: カメラ起動中…');
+          // Best-effort: keep the display awake during exhibition
+          try{ requestWakeLock(); }catch(_e){}
+
+          // Ensure the preview wrapper stays in the render tree
+          if (cam.wrap){
+            cam.wrap.style.display = 'block';
+            if (!cam.preview) cam.wrap.style.opacity = '0.001';
           }
 
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video:{facingMode:'user', width:{ideal:640}, height:{ideal:480}, frameRate:{ideal:30, max:30}},
-            audio:false
-          });
+          // Stop existing stream cleanly
+          if (cam.stream){
+            try{
+              const tracks = cam.stream.getTracks ? cam.stream.getTracks() : [];
+              tracks.forEach(t=>{ try{ t.stop(); }catch(_e){} });
+            }catch(_e){}
+            cam.stream = null;
+          }
+
+          const constraints = {video:{facingMode:'user', width:{ideal:480}, height:{ideal:360}, frameRate:{ideal:30, max:30}}, audio:false};
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
           cam.stream = stream;
+          cam.video.muted = true;
+          cam.video.autoplay = true;
+          cam.video.setAttribute('playsinline','');
+          cam.video.playsInline = true;
           cam.video.srcObject = stream;
-          await cam.video.play();
+
+          // Wait metadata so play() is more reliable
+          await new Promise(resolve=>{
+            if (cam.video.readyState >= 1) return resolve();
+            cam.video.onloadedmetadata = ()=> resolve();
+          });
+
+          // Some browsers may still require a user gesture for play(); keep stream and ask for a click.
+          try{
+            await cam.video.play();
+          }catch(playErr){
+            console.warn(playErr);
+            updateDiag('診断: 画面クリックでカメラ開始');
+            const resume = async ()=>{
+              document.removeEventListener('pointerdown', resume, true);
+              document.removeEventListener('mousedown', resume, true);
+              document.removeEventListener('touchstart', resume, true);
+              try{
+                await cam.video.play();
+                updateDiag('診断: カメラ起動中…');
+              }catch(_e){
+                updateDiag('診断: カメラ不可（権限/環境）');
+              }
+            };
+            document.addEventListener('pointerdown', resume, true);
+            document.addEventListener('mousedown', resume, true);
+            document.addEventListener('touchstart', resume, true);
+          }
 
           cam.enabled = true;
-          cam.preview = false;
-          if (cam.wrap) cam.wrap.style.display = cam.preview ? 'block' : 'none';
+          cam.preview = !!(togglePreview && togglePreview.checked);
+          applyPreviewVisibility();
+
+          // Remember: after the first successful start, auto-start on reload/return.
+          try{ localStorage.setItem(LS_CAM_GRANTED, '1'); }catch(_e){}
 
           cam.api='MediaPipe';
           cam.detector=null;
@@ -1259,8 +1111,21 @@ function startEnter(type, now){
           cam.faceAt = 0;
           cam.lastSeenAt = 0;
           cam.noFaceStreak = 0;
+          cam.hitStreak = 0;
 
+          // Hide face box until a face is detected
           if (cam.faceBox) cam.faceBox.style.display = 'none';
+
+          // Auto-restart if the camera track ends (e.g., background/foreground)
+          try{
+            const vts = stream.getVideoTracks ? stream.getVideoTracks() : [];
+            if (vts && vts[0] && vts[0].addEventListener){
+              vts[0].addEventListener('ended', ()=>{
+                cam.enabled = false;
+                if (document.visibilityState === 'visible') ensureCameraRunning('track-ended');
+              });
+            }
+          }catch(_e){}
 
           try{
             cam.detector = await initMediaPipeFaceDetector();
@@ -1270,18 +1135,29 @@ function startEnter(type, now){
             cam.api = 'none';
           }
 
-          if (startOverlay) startOverlay.style.display = 'none';
-          cam.starting = false;
-          updateDiag();
+          // Persist current UI state (best effort)
+          savePersistedStateSoon();
+
         }catch(e){
-          console.warn(e);
-          cam.starting = false;
-          updateDiag('診断: カメラ開始に失敗（権限/対応/HTTPSを確認）');
+          console.error(e);
+          updateDiag('診断: カメラ不可（権限/環境）');
+          // If auto start failed, allow retry by a single click/tap.
+          if (opts && opts.auto){
+            const retry = ()=>{
+              document.removeEventListener('pointerdown', retry, true);
+              document.removeEventListener('mousedown', retry, true);
+              document.removeEventListener('touchstart', retry, true);
+              startCamera({ force:true, auto:false, reason:'tap-retry' });
+            };
+            document.addEventListener('pointerdown', retry, true);
+            document.addEventListener('mousedown', retry, true);
+            document.addEventListener('touchstart', retry, true);
+          }
         }
       }
 
-      function ensureProcCanvas(){
 
+      function ensureProcCanvas(){
         if (!cam.procCanvas){
           cam.procCanvas = document.createElement('canvas');
           cam.procCtx = cam.procCanvas.getContext('2d', { alpha:false, desynchronized:true });
@@ -1349,45 +1225,66 @@ function startEnter(type, now){
           try{
             const { res, vw, vh } = detectOnPreviewCanvas(now);
             const faces = (res && Array.isArray(res.detections)) ? res.detections : [];
-            if (faces.length>0){
-              cam.noFaceStreak = 0;
-              cam.lastSeenAt = now;
+if (faces.length>0){
 
-              // pick largest face
-              let best = faces[0];
-              for (let i=1;i<faces.length;i++){
-                const b = faces[i].boundingBox; const bb = best.boundingBox;
-                if (b && bb && (b.width*b.height > bb.width*bb.height)) best = faces[i];
-              }
+  // pick largest face
+  let best = faces[0];
+  for (let i=1;i<faces.length;i++){
+    const b = faces[i].boundingBox; const bb = best.boundingBox;
+    if (b && bb && (b.width*b.height > bb.width*bb.height)) best = faces[i];
+  }
 
-              const bb = best.boundingBox;
-              if (bb && vw>1 && vh>1){
-                const cxRaw = (bb.originX + bb.width*0.5) / vw;
-                const cyRaw = (bb.originY + bb.height*0.5) / vh;
+  const bb = best.boundingBox;
+  if (bb && vw>1 && vh>1){
 
-                // previewは左右反転して表示しているので、操作感を合わせてXを反転
-                const cx = 1.0 - cxRaw;
-                const cy = cyRaw;
+    // --- Detect debounce: require consecutive HIT_CONFIRM_STREAK frames ---
+    cam.hitStreak = (cam.hitStreak||0) + 1;
 
-                const wNorm = Math.max(0.00001, bb.width / vw);
-                const hNorm = Math.max(0.00001, bb.height / vh);
-                const size = Math.max(0.00001, (bb.width * bb.height) / (vw * vh));
-                cam.face = {has:true, cx, cy, size, w:wNorm, h:hNorm};
-                cam.faceAt = now;
+    if (cam.hitStreak >= HIT_CONFIRM_STREAK){
 
-                // Update preview overlay (green square)
-                updateFaceBoxFromBB(bb, vw, vh);
-              } else {
-                cam.noFaceStreak = (cam.noFaceStreak||0) + 1;
-              cam.face.has = false;
-                if (cam.faceBox) cam.faceBox.style.display = 'none';
-                cam._faceBoxSmooth = null;
-              }
-            } else {
-              cam.face.has = false;
-              if (cam.faceBox) cam.faceBox.style.display = 'none';
-                cam._faceBoxSmooth = null;
-            }
+      cam.noFaceStreak = 0;
+      cam.lastSeenAt = now;
+
+      const cxRaw = (bb.originX + bb.width*0.5) / vw;
+      const cyRaw = (bb.originY + bb.height*0.5) / vh;
+
+      // previewは左右反転して表示しているので、操作感を合わせてXを反転
+      const cx = 1.0 - cxRaw;
+      const cy = cyRaw;
+
+      const wNorm = Math.max(0.00001, bb.width / vw);
+      const hNorm = Math.max(0.00001, bb.height / vh);
+      const size = Math.max(0.00001, (bb.width * bb.height) / (vw * vh));
+      cam.face = {has:true, cx, cy, size, w:wNorm, h:hNorm};
+      cam.faceAt = now;
+
+      // Update preview overlay (green square)
+      updateFaceBoxFromBB(bb, vw, vh);
+
+    } else {
+      // Not confirmed yet (1st hit) -> treat as "not seen"
+      cam.noFaceStreak = (cam.noFaceStreak||0) + 1;
+      cam.face.has = false;
+      if (cam.faceBox) cam.faceBox.style.display = 'none';
+      cam._faceBoxSmooth = null;
+    }
+
+  } else {
+    // invalid bb
+    cam.hitStreak = 0;
+    cam.noFaceStreak = (cam.noFaceStreak||0) + 1;
+    cam.face.has = false;
+    if (cam.faceBox) cam.faceBox.style.display = 'none';
+    cam._faceBoxSmooth = null;
+  }
+
+} else {
+  cam.hitStreak = 0;
+  cam.noFaceStreak = (cam.noFaceStreak||0) + 1;
+  cam.face.has = false;
+  if (cam.faceBox) cam.faceBox.style.display = 'none';
+  cam._faceBoxSmooth = null;
+}
           }catch(_e){
 	            // If MediaPipe throws (often due to runningMode mismatch or source type), log it.
 	            console.error('[FaceDetect]', _e);
@@ -1505,7 +1402,7 @@ function drawSlime(){
   p.push();
   const ctx = p.drawingContext;
   ctx.save();
-  _clipRoundedRect(ctx, viewRect);
+  _clipRoundedRect(ctx, { minX: viewRect.minX, maxX: viewRect.maxX, minY: viewRect.minY, maxY: viewRect.maxY, r: 0 });
   p.tint(renderTint.r, renderTint.g, renderTint.b, renderTint.a);
   p.image(gBlob, 0, 0, p.width, p.height);
   ctx.restore();
@@ -1520,7 +1417,8 @@ function drawSlime(){
 
         if (cam.enabled) runDetection(now);
         const camSeen = cam.enabled ? ((now-cam.lastSeenAt<=SEEN_DEBOUNCE_MS) && ((cam.noFaceStreak||0) < LOST_CONFIRM_STREAK)) : false;
-        seen = camSeen;
+        const effectiveSeen = cam.enabled ? camSeen : false;
+        seen = effectiveSeen;
 
         // Seen edge handling (IDLE / ENTER / SHOW only)
         if (!prevSeen && seen){
@@ -1642,18 +1540,12 @@ const ufNow = 1.0 - sfNow;
           a.x += a.vx;
           a.y += a.vy;
 
-          // keep inside visible area (viewRect) — shared rule: device active area == clock region
-          const wallPad = Math.max(2, DISC_RADIUS * 0.9);
-          const minX = viewRect.minX + wallPad;
-          const maxX = viewRect.maxX - wallPad;
-          const minY = viewRect.minY + wallPad;
-          const maxY = viewRect.maxY - wallPad;
+          // keep inside canvas
+          if (a.x < 0){ a.x = 0; a.vx *= -0.5; }
+          else if (a.x > p.width){ a.x = p.width; a.vx *= -0.5; }
 
-          if (a.x < minX){ a.x = minX; a.vx *= -0.5; }
-          else if (a.x > maxX){ a.x = maxX; a.vx *= -0.5; }
-
-          if (a.y < minY){ a.y = minY; a.vy *= -0.5; }
-          else if (a.y > maxY){ a.y = maxY; a.vy *= -0.5; }
+          if (a.y < 0){ a.y = 0; a.vy *= -0.5; }
+          else if (a.y > p.height){ a.y = p.height; a.vy *= -0.5; }
         }
 
 // SLIME rendering
