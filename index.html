@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob:; worker-src 'self' blob:; object-src 'none';">
 
-  <title>共有_サボる時計 v0.2.8</title>
+  <title>サボる時計</title>
 
   <style>
     :root{ color-scheme: dark; }
@@ -27,18 +27,23 @@
     #cam{ width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
     #faceBox{ position:absolute; border:2px solid #2cff65; box-sizing:border-box; display:none; left:0; top:0; width:0; height:0; pointer-events:none; }
 
-    /* ---- Minimal UI ---- */
-    #ui{ position:fixed; left:12px; bottom:12px; z-index:60; width:min(560px, calc(100vw - 24px)); background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px 12px; backdrop-filter: blur(10px); }
+    /* ---- Minimal UI (menu) ---- */
+    #ui{ position:fixed; left:12px; bottom:12px; z-index:60; width:260px; max-width:calc(100vw - 24px); background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.14); border-radius:12px; padding:10px 12px 12px; backdrop-filter: blur(10px); }
     #ui .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-    #ui .note{ font-size:12px; opacity:0.82; margin:0 0 8px; }
-    #diag{ font-size:12px; opacity:0.9; margin:0; white-space:pre-wrap; }
+
+    .uiHeader{ position:relative; display:flex; align-items:center; gap:10px; margin-bottom:10px; }
     
     #ui label.chk{ display:inline-flex; gap:6px; align-items:center; font-size:12px; opacity:0.92; user-select:none; }
     #ui label.chk input{ transform: translateY(0.5px); }
-.btn{ appearance:none; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.08); color:#fff; border-radius:10px; padding:8px 10px; font-size:12px; cursor:pointer; }
+
+    .btn{ appearance:none; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.08); color:#fff; border-radius:10px; padding:8px 10px; font-size:12px; cursor:pointer; }
     .btn:active{ transform: translateY(1px); }
 
-    #uiFab{ position:fixed; right:12px; bottom:12px; z-index:61; width:44px; height:44px; border-radius:22px; border:1px solid rgba(255,255,255,0.18); background:rgba(0,0,0,0.55); display:none; cursor:pointer; }
+    /* UI hide button: circled X, pinned to top-right of menu */
+    #btnHideUI{ position:absolute; right:0; top:0; width:28px; height:28px; padding:0; border-radius:999px; display:flex; align-items:center; justify-content:center; font-size:16px; line-height:1; background:transparent; }
+
+    /* Menu button (shown when UI is hidden): bottom-left, small square */
+    #uiFab{ position:fixed; left:12px; bottom:12px; z-index:61; width:44px; height:44px; border-radius:8px; border:1px solid rgba(255,255,255,0.18); background:rgba(0,0,0,0.55); display:block; cursor:pointer; font-size:20px; line-height:44px; text-align:center; user-select:none; }
 
     /* Fullscreen help modal */
     #fsHelp{ position:fixed; inset:0; display:none; z-index:2000; background:rgba(0,0,0,0.7); }
@@ -53,7 +58,7 @@
   <!-- Start overlay (camera is required) -->
   <div id="startOverlay">
     <div class="panel">
-      <h1>サボる時計（共有版）</h1>
+      <h1>サボる時計</h1>
       <p>この作品は <b>カメラで顔を検出</b> して、「見られている / 見られていない」を判定します。開始するには、下のボタンを押してカメラを許可してください。</p>
       <button id="btnCam">カメラを許可して開始</button>
       <p class="small">※カメラのない端末 / 権限が拒否されている場合は動作しません。<br>※HTTPS（GitHub Pages）または localhost でのみカメラが使えます。</p>
@@ -69,19 +74,17 @@
   </div>
 
   <!-- Minimal UI -->
-  <div id="ui">
-    <p class="note">共有_サボる時計 v0.2.8 / GitHub Pages 用</p>
-    <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+  <div id="ui" style="display:none">
+    <div class="uiHeader">
       <button id="btnFS" class="btn">フルスクリーン</button>
-      <button id="btnHideUI" class="btn">UIを隠す</button>
+      <button id="btnHideUI" class="btn" aria-label="UIを隠す">×</button>
     </div>
-    <div class="row" style="gap:16px; margin-bottom:8px;">
+    <div class="row" style="gap:16px;">
       <label class="chk"><input type="checkbox" id="togglePreview">カメラプレビュー</label>
       <label class="chk"><input type="checkbox" id="toggleFaceBox">緑枠</label>
     </div>
-    <p id="diag">診断: 起動中…</p>
   </div>
-  <button id="uiFab" aria-label="Show UI"></button>
+  <button id="uiFab" aria-label="メニュー" title="メニュー">≡</button>
 
   <!-- Fullscreen help -->
   <div id="fsHelp">
